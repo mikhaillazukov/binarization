@@ -1,2 +1,2 @@
-# binarization
-Binarization algorithms
+# Binarization algorithms
+
