@@ -1,9 +1,11 @@
+import multiprocessing
 import sys
-
+import os
+import istarmap
 import click
 import numpy as np
 from PIL import Image
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 
 def otsu_method(image):
@@ -96,7 +98,8 @@ def build_integral_image(image):
     return np.pad(integral_image, (1, 0), constant_values=0)
 
 
-def niblack_method(image: np.ndarray, window_scope: int = 5, k: float = -0.2, a: float = 0) -> np.ndarray:
+def niblack_method(image: np.ndarray, window_scope: int = 5,
+                   k: float = -0.2, a: float = 0) -> np.ndarray:
     """Реализация локального метода Ниблэка. Вычисление порога происходит по формуле:
     t = mean + k * std + a
 
@@ -116,7 +119,7 @@ def niblack_method(image: np.ndarray, window_scope: int = 5, k: float = -0.2, a:
     integral_square_image = build_integral_image(np.square(padded_image))
 
     binarized_image = np.zeros(image.shape, dtype=np.uint8)
-    for i in tqdm(range(image.shape[0]), desc="Niblack method"):
+    for i in range(image.shape[0]):
         for j in range(image.shape[1]):
             mean = (integral_image[i + window_size, j + window_size] +
                     integral_image[i, j] -
@@ -136,7 +139,9 @@ def niblack_method(image: np.ndarray, window_scope: int = 5, k: float = -0.2, a:
     return binarized_image
 
 
-def multiscale_niblack_method(image: np.ndarray, window_scope: int = 5, k: float = -0.2, a: float = 0, std_threshold: float = 5):
+def multiscale_niblack_method(image: np.ndarray, window_scope: int = 5,
+                              k: float = -0.2, a: float = 0,
+                              std_threshold: float = 5):
     """Реализация многомасштабного локального метода Ниблэка.
     Отличительной особенностью данного метода является динамический размер окна,
     который меняется в если дисперсия при текущем размере окна ниже заданного порога.
@@ -153,14 +158,14 @@ def multiscale_niblack_method(image: np.ndarray, window_scope: int = 5, k: float
         np.ndarray: Бинаризованное изображение
     """
     pad_width = min(image.shape) // 2
-    padded_image = np.pad(image.astype(np.float64), pad_width, mode="mean")
+    padded_image = np.pad(image.astype(np.float64), pad_width, mode="reflect")
 
     integral_image = build_integral_image(padded_image)
     integral_square_image = build_integral_image(np.square(padded_image))
 
     binarized_image = np.zeros(image.shape, dtype=np.uint8)
 
-    for i in tqdm(range(image.shape[0]), desc="Multiscale Niblack Method"):
+    for i in range(image.shape[0]):
         for j in range(image.shape[1]):
             std = -1
             window_size = window_scope * 2 + 1
@@ -187,8 +192,39 @@ def multiscale_niblack_method(image: np.ndarray, window_scope: int = 5, k: float
     return binarized_image
 
 
+def binarize_and_save_image(image_path: str, method: str, window_scope: int,
+                            k: float, a: float, std_threshold: float,
+                            output_path: str, allow_convert: bool,
+                            invert_result: bool):
+    if not os.path.exists(image_path):
+        raise click.BadParameter(f"{image_path} doesn't exists")
+
+    image = Image.open(image_path)
+    if image.mode != "L":
+        if not allow_convert:
+            raise click.BadParameter("Image must be grayscale")
+        else:
+            image = image.convert("L")
+    image = np.array(image)
+    if method == "otsu":
+        binarized_image = otsu_method(image)
+    elif method == "unbalanced_otsu":
+        binarized_image = unbalanced_otsu_method(image)
+    elif method == "niblack":
+        binarized_image = niblack_method(image, window_scope, k, a)
+    elif method == "multiscale_niblack":
+        binarized_image = multiscale_niblack_method(
+            image, window_scope, k, a, std_threshold)
+    else:
+        raise click.BadParameter(f"Unknown method: {method}")
+    if invert_result:
+        binarized_image = np.invert(binarized_image)
+    binarized_image = Image.fromarray(binarized_image)
+    binarized_image.save(output_path)
+
+
 @click.command()
-@click.option("--image", "-i",
+@click.option("--image-path", "-i",
               type=click.Path(exists=True),
               required=True,
               help="Input image path")
@@ -203,12 +239,12 @@ def multiscale_niblack_method(image: np.ndarray, window_scope: int = 5, k: float
               type=click.INT,
               default=5,
               help="Window scope. Window size is window_scope*2 + 1")
-@click.option("--k", "-k",
+@click.option("-k",
               type=click.FLOAT,
               default=-0.2,
               help="Parameter k for Niblack method. \
               Threshold calculated as mean + k * std + a")
-@click.option("--a", "-a",
+@click.option("-a",
               type=click.FLOAT,
               default=0,
               help="Parameter a for Niblack method. \
@@ -218,37 +254,55 @@ def multiscale_niblack_method(image: np.ndarray, window_scope: int = 5, k: float
               default=5,
               help="Std threshold for Multiscale Niblack method. \
               If std < std_threshold, window size doubles")
-@click.option("--output", "-o",
-              type=click.Path(file_okay=True, dir_okay=False),
+@click.option("--output-path", "-o",
+              type=click.Path(),
               required=True,
               help="Output image path")
 @click.option("--allow-convert", "-c",
               is_flag=True,
               default=False,
               help="Allow converting to grayscale")
-def binarize(image, method, window_scope, k, a, std_threshold, output, allow_convert):
-    image = Image.open(image)
-    if image.mode != "L":
-        if not allow_convert:
-            raise click.BadParameter("Image must be grayscale")
-        else:
-            image = image.convert("L")
-    click.echo(f"Used method: {method}")
-    image = np.array(image)
-    if method == "otsu":
-        binarized_image = otsu_method(image)
-    elif method == "unbalanced_otsu":
-        binarized_image = unbalanced_otsu_method(image)
-    elif method == "niblack":
-        binarized_image = niblack_method(image, window_scope, k, a)
-    elif method == "multiscale_niblack":
-        binarized_image = multiscale_niblack_method(
-            image, window_scope, k, a, std_threshold)
+@click.option("--invert-result",
+              is_flag=True,
+              default=False,
+              help="Invert mask")
+def binarize(image_path: str, method: str, window_scope: int,
+             k: float, a: float, std_threshold: float,
+             output_path: str, allow_convert: bool,
+             invert_result: bool):
+    click.echo(f"Method: {method}")
+    if os.path.isdir(output_path):
+        os.makedirs(output_path, exist_ok=True)
     else:
-        raise click.BadParameter(f"Unknown method: {method}")
-    binarized_image = Image.fromarray(binarized_image)
-    binarized_image.save(output)
-    click.echo(f"Saved to {output}")
+        if os.path.dirname(output_path) != "":
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    if os.path.isfile(image_path):
+        if os.path.isdir(output_path):
+            output_path = os.path.join(
+                output_path, os.path.basename(image_path))
+
+        binarize_and_save_image(image_path, method, window_scope, k, a,
+                                std_threshold, output_path, allow_convert,
+                                invert_result)
+        click.echo(f"Image saved to {output_path}")
+    else:
+        if os.path.isfile(output_path):
+            raise click.BadParameter("Output path must be a directory")
+        image_names = sorted(os.listdir(image_path))
+        new_data = []
+        for image_name in image_names:
+            binarized_image_name, _ = os.path.splitext(image_name)
+            new_data.append((
+                os.path.join(image_path, image_name),
+                method, window_scope, k, a,
+                std_threshold, os.path.join(
+                    output_path, f"{binarized_image_name}.png"),
+                allow_convert, invert_result)
+            )
+        with multiprocessing.Pool() as pool:
+            for _ in tqdm(pool.istarmap(binarize_and_save_image, new_data),
+                          total=len(new_data)):
+                pass
 
 
 if __name__ == "__main__":
